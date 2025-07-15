@@ -19,7 +19,7 @@ metadata:
   namespace: metallb-system
 spec:
   ipAddressPools:
-  - first-pool
+  - default-pool
 ```
 
 2a. `kubectl apply -f metallb-config.yaml`
