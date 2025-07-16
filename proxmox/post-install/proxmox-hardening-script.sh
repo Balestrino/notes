@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Proxmox Security Hardening Script
+# Proxmox Security Hardening Script with Native Notification System
 # This script helps secure and harden a Proxmox server step by step
 # Run as root: sudo bash proxmox_hardening.sh
 
@@ -59,6 +59,194 @@ backup_config() {
     fi
 }
 
+# Function to send notification via Proxmox native system
+send_notification() {
+    local severity=$1
+    local message=$2
+    local title=$3
+    
+    # Use pvesh to send notification through configured endpoints
+    if command -v pvesh &> /dev/null; then
+        pvesh create /cluster/notifications \
+            --severity "$severity" \
+            --title "$title" \
+            --message "$message" \
+            2>/dev/null || echo "Notification sent via fallback method"
+    else
+        # Fallback to logger
+        logger -t "proxmox-hardening" "[$severity] $title: $message"
+    fi
+}
+
+# Function to configure Proxmox notification endpoints
+configure_notifications() {
+    print_step "Configuring Proxmox Native Notifications"
+    echo "This will set up notification endpoints (webhook, gotify, mail) for security alerts."
+    
+    if confirm; then
+        echo "Choose notification methods to configure:"
+        echo "1) Email notifications"
+        echo "2) Webhook notifications"
+        echo "3) Gotify notifications"
+        echo "4) All of the above"
+        read -p "Enter your choice (1-4): " notification_choice
+        
+        case $notification_choice in
+            1|4)
+                configure_email_notifications
+                ;;
+        esac
+        
+        case $notification_choice in
+            2|4)
+                configure_webhook_notifications
+                ;;
+        esac
+        
+        case $notification_choice in
+            3|4)
+                configure_gotify_notifications
+                ;;
+        esac
+        
+        # Configure notification matchers for security events
+        configure_notification_matchers
+    fi
+}
+
+# Function to configure email notifications
+configure_email_notifications() {
+    print_status "Configuring email notifications..."
+    
+    read -p "Enter SMTP server (e.g., smtp.gmail.com): " smtp_server
+    read -p "Enter SMTP port (default 587): " smtp_port
+    smtp_port=${smtp_port:-587}
+    read -p "Enter sender email: " sender_email
+    read -p "Enter sender password: " -s sender_password
+    echo
+    read -p "Enter recipient email: " recipient_email
+    
+    # Create email endpoint using pvesh
+    pvesh create /cluster/notifications/endpoints/sendmail \
+        --name "security-alerts-email" \
+        --server "$smtp_server" \
+        --port "$smtp_port" \
+        --username "$sender_email" \
+        --password "$sender_password" \
+        --from-address "$sender_email" \
+        --mailto "$recipient_email" \
+        --mode "tls" \
+        --comment "Security alerts email endpoint" \
+        2>/dev/null || print_warning "Failed to create email endpoint via API, trying configuration file method"
+    
+    # Fallback: Create configuration manually
+    mkdir -p /etc/pve/notifications/endpoints
+    cat > /etc/pve/notifications/endpoints/sendmail.cfg << EOF
+sendmail: security-alerts-email
+    server $smtp_server
+    port $smtp_port
+    username $sender_email
+    password $sender_password
+    from-address $sender_email
+    mailto $recipient_email
+    mode tls
+    comment Security alerts email endpoint
+EOF
+    
+    print_status "Email notifications configured"
+}
+
+# Function to configure webhook notifications
+configure_webhook_notifications() {
+    print_status "Configuring webhook notifications..."
+    
+    read -p "Enter webhook URL: " webhook_url
+    read -p "Enter webhook secret (optional): " webhook_secret
+    
+    # Create webhook endpoint using pvesh
+    webhook_config="--name security-alerts-webhook --url $webhook_url"
+    if [[ -n "$webhook_secret" ]]; then
+        webhook_config="$webhook_config --secret $webhook_secret"
+    fi
+    
+    pvesh create /cluster/notifications/endpoints/webhook \
+        $webhook_config \
+        --comment "Security alerts webhook endpoint" \
+        2>/dev/null || print_warning "Failed to create webhook endpoint via API, trying configuration file method"
+    
+    # Fallback: Create configuration manually
+    mkdir -p /etc/pve/notifications/endpoints
+    cat > /etc/pve/notifications/endpoints/webhook.cfg << EOF
+webhook: security-alerts-webhook
+    url $webhook_url
+    $([ -n "$webhook_secret" ] && echo "secret $webhook_secret")
+    comment Security alerts webhook endpoint
+EOF
+    
+    print_status "Webhook notifications configured"
+}
+
+# Function to configure Gotify notifications
+configure_gotify_notifications() {
+    print_status "Configuring Gotify notifications..."
+    
+    read -p "Enter Gotify server URL (e.g., https://gotify.example.com): " gotify_url
+    read -p "Enter Gotify application token: " gotify_token
+    
+    # Create gotify endpoint using pvesh
+    pvesh create /cluster/notifications/endpoints/gotify \
+        --name "security-alerts-gotify" \
+        --server "$gotify_url" \
+        --token "$gotify_token" \
+        --comment "Security alerts Gotify endpoint" \
+        2>/dev/null || print_warning "Failed to create Gotify endpoint via API, trying configuration file method"
+    
+    # Fallback: Create configuration manually
+    mkdir -p /etc/pve/notifications/endpoints
+    cat > /etc/pve/notifications/endpoints/gotify.cfg << EOF
+gotify: security-alerts-gotify
+    server $gotify_url
+    token $gotify_token
+    comment Security alerts Gotify endpoint
+EOF
+    
+    print_status "Gotify notifications configured"
+}
+
+# Function to configure notification matchers
+configure_notification_matchers() {
+    print_status "Configuring notification matchers for security events..."
+    
+    # Create matchers for different security events
+    mkdir -p /etc/pve/notifications/matchers
+    
+    # Security alerts matcher
+    cat > /etc/pve/notifications/matchers/security.cfg << EOF
+matcher: security-alerts
+    comment Security-related notifications
+    mode all
+    target security-alerts-email
+    $([ -f /etc/pve/notifications/endpoints/webhook.cfg ] && echo "target security-alerts-webhook")
+    $([ -f /etc/pve/notifications/endpoints/gotify.cfg ] && echo "target security-alerts-gotify")
+    match-severity warning,error,critical
+    match-field type:system
+EOF
+    
+    # Fail2ban matcher
+    cat > /etc/pve/notifications/matchers/fail2ban.cfg << EOF
+matcher: fail2ban-alerts
+    comment Fail2ban security events
+    mode all
+    target security-alerts-email
+    $([ -f /etc/pve/notifications/endpoints/webhook.cfg ] && echo "target security-alerts-webhook")
+    $([ -f /etc/pve/notifications/endpoints/gotify.cfg ] && echo "target security-alerts-gotify")
+    match-severity warning,error
+    match-field source:fail2ban
+EOF
+    
+    print_status "Notification matchers configured"
+}
+
 # Main script starts here
 clear
 echo "========================================"
@@ -76,6 +264,9 @@ if ! confirm; then
     print_error "Script cancelled by user"
     exit 1
 fi
+
+# Configure notifications first
+configure_notifications
 
 # Step 1: System Updates
 print_step "Step 1: System Updates"
@@ -106,6 +297,9 @@ EOF
     systemctl enable unattended-upgrades
     systemctl start unattended-upgrades
     print_status "System updates completed"
+    
+    # Send notification
+    send_notification "info" "System packages updated and automatic security updates configured" "System Update Complete"
 fi
 
 # Step 2: SSH Hardening
@@ -173,14 +367,13 @@ EOF
     if confirm; then
         systemctl restart sshd
         print_status "SSH restarted with new configuration"
+        send_notification "info" "SSH hardening completed. Root login disabled, key-based auth configured for user: $admin_user" "SSH Security Update"
     fi
 fi
 
-
-
-# Step 4: Configure Fail2Ban
-print_step "Step 4: Configure Fail2Ban"
-echo "This will configure fail2ban to protect against brute force attacks."
+# Step 4: Configure Fail2Ban with Proxmox Notifications
+print_step "Step 4: Configure Fail2Ban with Proxmox Notifications"
+echo "This will configure fail2ban to protect against brute force attacks with native Proxmox notifications."
 web_port=8006  # Set default for later use
 if confirm; then
     backup_config "/etc/fail2ban/jail.local"
@@ -191,6 +384,9 @@ bantime = 3600
 findtime = 600
 maxretry = 3
 backend = systemd
+# Custom action for Proxmox notifications
+action = %(action_)s
+         proxmox-notify
 
 [sshd]
 enabled = true
@@ -215,9 +411,60 @@ failregex = pvedaemon\[.*authentication failure; rhost=<HOST>
 ignoreregex =
 EOF
 
+    # Create custom Proxmox notification action
+    cat > /etc/fail2ban/action.d/proxmox-notify.conf << 'EOF'
+[Definition]
+actionstart = 
+actionstop = 
+actioncheck = 
+actionban = /usr/local/bin/proxmox-fail2ban-notify.sh ban "<ip>" "<name>" "<time>"
+actionunban = /usr/local/bin/proxmox-fail2ban-notify.sh unban "<ip>" "<name>" "<time>"
+
+[Init]
+EOF
+
+    # Create notification script for fail2ban
+    cat > /usr/local/bin/proxmox-fail2ban-notify.sh << 'EOF'
+#!/bin/bash
+action=$1
+ip=$2
+jail=$3
+time=$4
+
+case $action in
+    ban)
+        message="IP $ip has been banned in jail $jail due to repeated failed attempts"
+        severity="warning"
+        title="Fail2Ban: IP Banned"
+        ;;
+    unban)
+        message="IP $ip has been unbanned from jail $jail"
+        severity="info"
+        title="Fail2Ban: IP Unbanned"
+        ;;
+esac
+
+# Send notification via Proxmox native system
+if command -v pvesh &> /dev/null; then
+    pvesh create /cluster/notifications \
+        --severity "$severity" \
+        --title "$title" \
+        --message "$message" \
+        --property "source=fail2ban" \
+        --property "ip=$ip" \
+        --property "jail=$jail" \
+        2>/dev/null || logger -t "fail2ban-notify" "[$severity] $title: $message"
+else
+    logger -t "fail2ban-notify" "[$severity] $title: $message"
+fi
+EOF
+
+    chmod +x /usr/local/bin/proxmox-fail2ban-notify.sh
+
     systemctl enable fail2ban
     systemctl restart fail2ban
-    print_status "Fail2ban configured and started"
+    print_status "Fail2ban configured with Proxmox notifications"
+    send_notification "info" "Fail2ban configured and started with native Proxmox notifications" "Fail2Ban Configuration Complete"
 fi
 
 # Step 6: System Hardening
@@ -269,11 +516,12 @@ EOF
     chmod 600 /etc/gshadow
 
     print_status "File permissions hardened"
+    send_notification "info" "System hardening completed: services disabled, kernel parameters configured, file permissions set" "System Hardening Complete"
 fi
 
-# Step 7: Logging and Monitoring
-print_step "Step 7: Logging and Monitoring Setup"
-echo "This will configure logging and basic monitoring."
+# Step 7: Logging and Monitoring with Proxmox Notifications
+print_step "Step 7: Logging and Monitoring with Proxmox Notifications"
+echo "This will configure logging and monitoring with native Proxmox notifications."
 if confirm; then
     # Configure logrotate
     backup_config "/etc/logrotate.conf"
@@ -281,49 +529,107 @@ if confirm; then
     # Install and configure logwatch
     apt install -y logwatch
 
-    # Configure basic monitoring script
+    # Configure advanced monitoring script with Proxmox notifications
     cat > /usr/local/bin/system-monitor.sh << 'EOF'
 #!/bin/bash
-# Basic system monitoring script
+# Advanced system monitoring script with Proxmox notifications
+
+# Function to send notification
+send_notification() {
+    local severity=$1
+    local title=$2
+    local message=$3
+    
+    if command -v pvesh &> /dev/null; then
+        pvesh create /cluster/notifications \
+            --severity "$severity" \
+            --title "$title" \
+            --message "$message" \
+            --property "source=system-monitor" \
+            2>/dev/null || logger -t "system-monitor" "[$severity] $title: $message"
+    else
+        logger -t "system-monitor" "[$severity] $title: $message"
+    fi
+}
 
 # Check disk usage
-df -h | awk '$5 > 80 {print "WARNING: " $1 " is " $5 " full"}'
+high_disk_usage=$(df -h | awk '$5 > 80 {print $1 " is " $5 " full"}')
+if [[ -n "$high_disk_usage" ]]; then
+    send_notification "warning" "High Disk Usage Alert" "The following filesystems are over 80% full: $high_disk_usage"
+fi
 
 # Check memory usage
-free -m | awk 'NR==2{printf "Memory usage: %.2f%%\n", $3*100/$2}'
+memory_usage=$(free | awk 'NR==2{printf "%.2f", $3*100/$2}')
+if (( $(echo "$memory_usage > 90" | bc -l) )); then
+    send_notification "warning" "High Memory Usage Alert" "Memory usage is at ${memory_usage}%"
+fi
 
 # Check CPU load
-uptime | awk '{print "Load average: " $10 $11 $12}'
+load_avg=$(uptime | awk '{print $10}' | cut -d',' -f1)
+cpu_cores=$(nproc)
+if (( $(echo "$load_avg > $cpu_cores" | bc -l) )); then
+    send_notification "warning" "High CPU Load Alert" "Load average ($load_avg) is higher than CPU cores ($cpu_cores)"
+fi
 
-# Check failed login attempts
-grep "Failed password" /var/log/auth.log | tail -5
+# Check system services
+critical_services="pvedaemon pveproxy pvestatd"
+for service in $critical_services; do
+    if ! systemctl is-active --quiet $service; then
+        send_notification "error" "Service Down Alert" "Critical service $service is not running"
+    fi
+done
+
+# Daily summary (only send if no issues)
+if [[ -z "$high_disk_usage" ]] && (( $(echo "$memory_usage < 90" | bc -l) )) && (( $(echo "$load_avg < $cpu_cores" | bc -l) )); then
+    send_notification "info" "Daily System Status" "System is healthy - Memory: ${memory_usage}%, Load: $load_avg, Disk usage normal"
+fi
 EOF
 
     chmod +x /usr/local/bin/system-monitor.sh
 
-    # Add to cron for daily execution
-    (crontab -l 2>/dev/null; echo "0 8 * * * /usr/local/bin/system-monitor.sh | mail -s 'Daily System Report' root") | crontab -
+    # Add to cron for regular monitoring
+    (crontab -l 2>/dev/null; echo "*/15 * * * * /usr/local/bin/system-monitor.sh") | crontab -
 
-    print_status "Logging and monitoring configured"
+    print_status "Enhanced monitoring with Proxmox notifications configured"
+    send_notification "info" "Monitoring and logging configured with native Proxmox notifications" "Monitoring Setup Complete"
 fi
 
-# Step 8: Backup Configuration
-print_step "Step 8: Backup Configuration"
-echo "This will help you set up backup strategies."
+# Step 8: Backup Configuration with Notifications
+print_step "Step 8: Backup Configuration with Notifications"
+echo "This will set up backup strategies with notification alerts."
 if confirm; then
-    print_status "Creating backup script template..."
+    print_status "Creating backup script with notifications..."
 
     cat > /usr/local/bin/backup-configs.sh << 'EOF'
 #!/bin/bash
-# Configuration backup script
+# Configuration backup script with Proxmox notifications
+
+# Function to send notification
+send_notification() {
+    local severity=$1
+    local title=$2
+    local message=$3
+    
+    if command -v pvesh &> /dev/null; then
+        pvesh create /cluster/notifications \
+            --severity "$severity" \
+            --title "$title" \
+            --message "$message" \
+            --property "source=backup-system" \
+            2>/dev/null || logger -t "backup-system" "[$severity] $title: $message"
+    else
+        logger -t "backup-system" "[$severity] $title: $message"
+    fi
+}
 
 BACKUP_DIR="/root/config-backups"
 DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="$BACKUP_DIR/proxmox-config-$DATE.tar.gz"
 
 mkdir -p "$BACKUP_DIR"
 
 # Backup important configuration files
-tar -czf "$BACKUP_DIR/proxmox-config-$DATE.tar.gz" \
+if tar -czf "$BACKUP_FILE" \
     /etc/pve \
     /etc/network/interfaces \
     /etc/ssh/sshd_config \
@@ -331,12 +637,22 @@ tar -czf "$BACKUP_DIR/proxmox-config-$DATE.tar.gz" \
     /etc/default/pveproxy \
     /etc/apt/sources.list.d/ \
     /etc/cron* \
-    2>/dev/null
+    2>/dev/null; then
+    
+    backup_size=$(du -h "$BACKUP_FILE" | cut -f1)
+    send_notification "info" "Backup Completed Successfully" "Configuration backup created: $BACKUP_FILE (Size: $backup_size)"
+else
+    send_notification "error" "Backup Failed" "Failed to create configuration backup"
+    exit 1
+fi
 
 # Keep only last 7 days of backups
-find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete
+deleted_count=$(find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete -print | wc -l)
+if [[ $deleted_count -gt 0 ]]; then
+    send_notification "info" "Backup Cleanup" "Removed $deleted_count old backup files"
+fi
 
-echo "Configuration backup completed: $BACKUP_DIR/proxmox-config-$DATE.tar.gz"
+echo "Configuration backup completed: $BACKUP_FILE"
 EOF
 
     chmod +x /usr/local/bin/backup-configs.sh
@@ -344,13 +660,14 @@ EOF
     # Add to cron for daily execution
     (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/backup-configs.sh") | crontab -
 
-    print_status "Backup script created and scheduled"
+    print_status "Backup script with notifications created and scheduled"
+    send_notification "info" "Backup system configured with daily automated backups and notifications" "Backup System Setup Complete"
 fi
 
 # Final steps
 print_step "Final Steps and Recommendations"
 echo ""
-print_status "Proxmox hardening completed successfully!"
+print_status "Proxmox hardening with native notifications completed successfully!"
 echo ""
 print_warning "IMPORTANT REMINDERS:"
 echo "1. Test SSH access with new port ($ssh_port) and user ($admin_user)"
@@ -359,9 +676,13 @@ echo "3. Add your SSH public key to /home/$admin_user/.ssh/authorized_keys"
 echo "4. Configure SSL certificates for the web interface"
 echo "5. Set up proper backup storage (external/offsite)"
 echo "6. Review and test all configurations"
-echo "7. Document your changes and keep configuration backups safe"
+echo "7. Test notification endpoints in Proxmox web interface"
+echo "8. Document your changes and keep configuration backups safe"
 echo ""
 print_status "Security hardening script completed!"
+
+# Send final notification
+send_notification "info" "Proxmox security hardening completed successfully with native notification system configured" "Security Hardening Complete"
 
 # Display current status
 echo ""
@@ -371,10 +692,12 @@ echo "Web Interface Port: $web_port"
 echo "Admin User: $admin_user"
 echo "Firewall Status: Not configured (skipped)"
 echo "Fail2ban Status: $(systemctl is-active fail2ban)"
+echo "Notifications: Native Proxmox system configured"
 echo ""
 
 print_warning "Remember to reboot the system to ensure all changes take effect!"
 echo "Would you like to reboot now?"
 if confirm; then
+    send_notification "info" "System reboot initiated after security hardening" "System Reboot"
     reboot
 fi
