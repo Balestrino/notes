@@ -10,7 +10,7 @@ VMID=5000
 STORAGE="local-zfs"
 # TEMPLATE_NAME="ubuntu-2404-template"
 # UBUNTU_VERSION="noble"
-TEMPLATE_NAME="ubuntu-2504-template"
+TEMPLATE_NAME="ubuntu-2504"
 UBUNTU_VERSION="plucky"
 MEMORY=2048
 CORES=2
@@ -255,7 +255,7 @@ create_vm_template() {
     qm set $VMID --boot order=virtio0
     qm set $VMID --scsi1 $STORAGE:cloudinit
     qm set $VMID --cicustom "vendor=local:snippets/$(basename "$CLOUD_INIT_FILE")"
-    qm set $VMID --tags ubuntu-template,cloudinit
+    qm set $VMID --tags $(TEMPLATE_NAME)
     qm set $VMID --ciuser $USER
     qm set $VMID --sshkeys ~/.ssh/authorized_keys
     qm set $VMID --ipconfig0 ip=dhcp
