@@ -5,7 +5,7 @@ mkdir -p /etc/rancher/rke2/
 nano /etc/rancher/rke2/config.yaml
 
 ```
-server: https://192.168.88.200:9345
+server: https://192.168.xx.xxx:9345
 token:
 ```
 

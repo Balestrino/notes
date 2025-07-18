@@ -1,0 +1,104 @@
+#
+# MikroTik Firewall Script for Zero Trust VLAN Segmentation
+# Based on network-design.yml
+#
+
+# =================================================================
+# Step 1: Define Address Lists for each VLAN and for all internal networks
+# =================================================================
+# This makes firewall rules much cleaner and easier to manage.
+
+/ip firewall address-list
+add address=192.168.88.0/24 list=VLAN10_Servers
+add address=192.168.89.0/24 list=VLAN11_Management
+add address=192.168.90.0/24 list=VLAN12_Security
+add address=192.168.91.0/24 list=VLAN20_Workstations
+add address=192.168.92.0/24 list=VLAN30_Storage
+add address=192.168.93.0/24 list=VLAN70_Guest_IoT
+add address=192.168.94.0/24 list=VLAN90_Untrusted_Lab
+
+# Create a master list of all internal RFC1918 networks for easy filtering
+add address=192.168.88.0/21 list=ALL_INTERNAL_VLANS
+
+
+# =================================================================
+# Step 2: Configure the FORWARD Chain (Inter-VLAN Traffic)
+# =================================================================
+# The default policy is to drop everything. We add rules to allow specific traffic.
+
+/ip firewall filter
+# Rule 0: Acceleration for established/related connections (performance)
+add action=fasttrack-connection chain=forward comment="FastTrack for Established/Related" connection-state=established,related
+
+# Rule 1: Accept established/related connections
+add action=accept chain=forward comment="Accept Established/Related" connection-state=established,related
+
+# Rule 2: Drop invalid connections
+add action=drop chain=forward comment="Drop Invalid Connections" connection-state=invalid
+
+# --- Workstation Access Rules ---
+# Rule 3: Allow Workstations to access Servers (e.g., web servers, Kubernetes services via MetalLB)
+add action=accept chain=forward comment="Allow Workstations -> Servers (HTTP/S)" connection-nat-state=!dstnat dst-address-list=VLAN10_Servers dst-port=80,443 protocol=tcp src-address-list=VLAN20_Workstations
+
+# Rule 4: Allow Workstations to access Management devices (SSH, Winbox, Webfig)
+add action=accept chain=forward comment="Allow Workstations -> Management (SSH, Winbox, HTTPS)" connection-nat-state=!dstnat dst-address-list=VLAN11_Management dst-port=22,8291,443 protocol=tcp src-address-list=VLAN20_Workstations
+
+# --- Server Access Rules ---
+# Rule 5: Allow Servers to access Storage network (NFS, iSCSI)
+add action=accept chain=forward comment="Allow Servers -> Storage (NFS, iSCSI)" connection-nat-state=!dstnat dst-address-list=VLAN30_Storage dst-port=2049,3260 protocol=tcp src-address-list=VLAN10_Servers
+
+# Rule 6: Allow Servers to send logs/metrics to the Security VLAN
+add action=accept chain=forward comment="Allow Servers -> Security (Syslog, SNMP)" connection-nat-state=!dstnat dst-address-list=VLAN12_Security dst-port=514,161 protocol=udp src-address-list=VLAN10_Servers
+
+# --- Security/Monitoring Access Rules ---
+# Rule 7: Allow Security VLAN to pull metrics from Servers (e.g., Prometheus Node Exporter)
+add action=accept chain=forward comment="Allow Security -> Servers (Prometheus)" connection-nat-state=!dstnat dst-address-list=VLAN10_Servers dst-port=9100 protocol=tcp src-address-list=VLAN12_Security
+
+# --- Internet Access Rules ---
+# Rule 8: Allow all trusted internal VLANs to access the internet
+# Assumes your WAN interface is named "ether1" or is in an interface list named "WAN"
+# Add any VLAN that should have internet access to the src-address-list
+add action=accept chain=forward comment="Allow Trusted VLANs to Internet" out-interface=ether1 src-address-list="VLAN10_Servers,VLAN11_Management,VLAN12_Security,VLAN20_Workstations"
+
+# --- Guest and Untrusted Network Isolation ---
+# Rule 9: Allow Guest/IoT network to access the internet ONLY
+add action=accept chain=forward comment="Allow Guest/IoT to Internet" out-interface=ether1 src-address-list=VLAN70_Guest_IoT
+
+# Rule 10: Allow Untrusted Lab network to access the internet ONLY
+add action=accept chain=forward comment="Allow Untrusted Lab to Internet" out-interface=ether1 src-address-list=VLAN90_Untrusted_Lab
+
+# Rule 11: Explicitly DROP traffic from Guest/IoT to any other internal VLAN
+add action=drop chain=forward comment="DROP Guest/IoT to Internal" dst-address-list=ALL_INTERNAL_VLANS src-address-list=VLAN70_Guest_IoT
+
+# Rule 12: Explicitly DROP traffic from Untrusted Lab to any other internal VLAN
+add action=drop chain=forward comment="DROP Untrusted Lab to Internal" dst-address-list=ALL_INTERNAL_VLANS src-address-list=VLAN90_Untrusted_Lab
+
+# --- Default Drop Rule ---
+# Rule 13: Drop all other inter-VLAN traffic that was not explicitly allowed
+add action=drop chain=forward comment="DROP All Other Inter-VLAN Traffic"
+
+
+# =================================================================
+# Step 3: Configure the INPUT Chain (Protecting the Router)
+# =================================================================
+# This controls who can access the router's management interfaces.
+
+/ip firewall filter
+# Rule 14: Accept established/related connections
+add action=accept chain=input comment="Accept Established/Related" connection-state=established,related
+
+# Rule 15: Drop invalid connections
+add action=drop chain=input comment="Drop Invalid Connections" connection-state=invalid
+
+# Rule 16: Allow Management VLAN to access the router
+add action=accept chain=input comment="Allow Management VLAN to Router" src-address-list=VLAN11_Management
+
+# Rule 17: Allow Workstations VLAN to access the router (for convenience, can be tightened)
+add action=accept chain=input comment="Allow Workstations VLAN to Router" src-address-list=VLAN20_Workstations
+
+# Rule 18: Allow ICMP (ping) from internal networks for troubleshooting
+add action=accept chain=input comment="Allow ICMP from Internal" protocol=icmp src-address-list=ALL_INTERNAL_VLANS
+
+# --- Default Drop Rule ---
+# Rule 19: Drop all other traffic to the router
+add action=drop chain=input comment="DROP All Other Input Traffic"

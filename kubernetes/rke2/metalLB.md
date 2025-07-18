@@ -10,7 +10,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 192.168.88.230-192.168.88.240 # Change this to a free range on your network!
+  - 192.168.xx.xxx-192.168.xx.xxx # Change this to a free range on your network!
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement

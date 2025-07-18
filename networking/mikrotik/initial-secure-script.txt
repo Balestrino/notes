@@ -1,0 +1,207 @@
+#
+# MikroTik RouterOS Initial Secure Setup Script
+#
+# !! IMPORTANT !!
+# 1. CONNECT TO THE ROUTER VIA CONSOLE OR MAC-WINBOX FOR THIS INITIAL SETUP.
+# 2. CHANGE THE PASSWORDS IN THIS SCRIPT BEFORE RUNNING.
+# 3. VERIFY THE WAN INTERFACE NAME (set to 'ether1' by default).
+#
+
+# =================================================================
+# Step 1: System Users and Password
+# =================================================================
+# The first step is always to secure access. We create a new admin user
+# and disable the default 'admin' user.
+
+# Set a strong password for the default admin user before we disable it.
+# It's a good practice to not leave it blank.
+/password set password="CHANGE-ME-WITH-GREAT-PASSWORD"
+
+# Create a new administrator user.
+# REPLACE 'YourNewAdminUser' and 'CHANGE-ME-WITH-GREAT-PASSWORD'
+/user add name="YourNewAdminUser" group=full password="CHANGE-ME-WITH-GREAT-PASSWORD" comment="Primary Administrator"
+
+# Disable the default admin user.
+/user disable [find name="admin"]
+
+
+# =================================================================
+# Step 2: Secure Services
+# =================================================================
+# Disable all non-essential services to reduce the attack surface.
+# We will then restrict access to essential services (SSH, Winbox)
+# to the Management VLAN only.
+
+# Create an address list for management access.
+# This is based on your network-design.yml. We'll create lists for all VLANs
+# to make the firewall rules cleaner and prepare for the full ruleset.
+/ip firewall address-list
+add address=192.168.88.0/24 list=VLAN10_Servers
+add address=192.168.89.0/24 list=VLAN11_Management
+add address=192.168.90.0/24 list=VLAN12_Security
+add address=192.168.91.0/24 list=VLAN20_Workstations
+add address=192.168.92.0/24 list=VLAN30_Storage
+add address=192.168.93.0/24 list=VLAN70_Guest_IoT
+add address=192.168.94.0/24 list=VLAN90_Untrusted_Lab
+
+# Create a master list of all internal networks for easy filtering
+add address=192.168.88.0/21 list=ALL_INTERNAL_VLANS
+# Disable unused services
+/ip service
+disable [find name="telnet"]
+disable [find name="ftp"]
+disable [find name="www"]
+disable [find name="www-ssl"]
+disable [find name="api"]
+disable [find name="api-ssl"]
+
+# Restrict SSH and Winbox to the management address list
+set [find name="ssh"] address-list=VLAN11_Management
+set [find name="winbox"] address-list=VLAN11_Management
+
+
+# =================================================================
+# Step 3: Interface Lists
+# =================================================================
+# Using interface lists makes firewall rules much more robust and easier to read.
+
+/interface list
+add name=WAN
+add name=LAN
+add name=TRUNK
+
+/interface list member
+# !! IMPORTANT !! Change 'ether1' to your actual WAN port (e.g., sfp-sfpplus1, etc.)
+add interface=ether1 list=WAN
+
+# !! IMPORTANT !! Change 'sfp-sfpplus2' to the port connected to your core switch.
+add interface=sfp-sfpplus2 list=TRUNK
+
+
+# =================================================================
+# Step 4: Create VLAN Interfaces
+# =================================================================
+# Create a VLAN interface for each subnet in your design.
+# They will all run on top of the main TRUNK interface.
+
+/interface vlan
+add interface=sfp-sfpplus2 name=vlan10-servers vlan-id=10
+add interface=sfp-sfpplus2 name=vlan11-management vlan-id=11
+add interface=sfp-sfpplus2 name=vlan12-security vlan-id=12
+add interface=sfp-sfpplus2 name=vlan20-workstations vlan-id=20
+add interface=sfp-sfpplus2 name=vlan30-storage vlan-id=30
+add interface=sfp-sfpplus2 name=vlan70-guest-iot vlan-id=70
+add interface=sfp-sfpplus2 name=vlan90-untrusted vlan-id=90
+add interface=sfp-sfpplus2 name=vlan80-reserved vlan-id=80
+
+# Add all new VLAN interfaces to the LAN interface list for easy firewall rule management.
+/interface list member
+add interface=vlan10-servers list=LAN
+add interface=vlan11-management list=LAN
+add interface=vlan12-security list=LAN
+add interface=vlan20-workstations list=LAN
+add interface=vlan30-storage list=LAN
+add interface=vlan70-guest-iot list=LAN
+add interface=vlan90-untrusted list=LAN
+add interface=vlan80-reserved list=LAN
+
+
+# =================================================================
+# Step 5: Basic WAN Firewall (Protecting the Router and LAN)
+# =================================================================
+# This is the most critical part. It blocks all unsolicited incoming traffic from the internet.
+# The policy is "default-drop": everything is blocked unless specifically allowed.
+
+/ip firewall filter
+# --- INPUT Chain (Traffic destined for the router itself) ---
+add action=accept chain=input comment="Accept Established/Related" connection-state=established,related
+add action=drop chain=input comment="Drop Invalid Connections" connection-state=invalid
+add action=drop chain=input src-address-list=port_scanners comment="Drop Port Scanners"
+add action=accept chain=input comment="Allow Management VLAN to Router" src-address-list=VLAN11_Management
+add action=accept chain=input comment="Allow Workstations VLAN to Router" src-address-list=VLAN20_Workstations
+add action=accept chain=input comment="Allow ICMP from Internal Networks" protocol=icmp src-address-list=ALL_INTERNAL_VLANS
+add action=add-src-to-address-list address-list=port_scanners address-list-timeout=1d chain=input protocol=tcp psd=21,3s,3,1 comment="Detect Port Scanners"
+add action=drop chain=input comment="DROP ALL OTHER INPUT"
+
+# --- FORWARD Chain (Traffic passing through the router) ---
+add action=fasttrack-connection chain=forward comment="FastTrack for Established/Related" connection-state=established,related hw-offload=yes
+add action=accept chain=forward comment="Accept Established/Related" connection-state=established,related
+add action=drop chain=forward comment="Drop Invalid Connections" connection-state=invalid
+add action=drop chain=forward src-address-list=port_scanners comment="Drop Port Scanners (Forward)"
+
+# Allow trusted VLANs to access the internet
+add action=accept chain=forward comment="Allow Trusted VLANs to Internet" out-interface-list=WAN src-address-list="VLAN10_Servers,VLAN11_Management,VLAN12_Security,VLAN20_Workstations"
+
+# Allow Guest/IoT and Untrusted Lab to access the internet ONLY
+add action=accept chain=forward comment="Allow Guest/IoT to Internet" out-interface-list=WAN src-address-list=VLAN70_Guest_IoT
+add action=accept chain=forward comment="Allow Untrusted Lab to Internet" out-interface-list=WAN src-address-list=VLAN90_Untrusted_Lab
+
+# Drop traffic from Guest/IoT and Untrusted to other internal networks
+add action=drop chain=forward comment="DROP Guest/IoT to Internal" dst-address-list=ALL_INTERNAL_VLANS src-address-list=VLAN70_Guest_IoT
+add action=drop chain=forward comment="DROP Untrusted Lab to Internal" dst-address-list=ALL_INTERNAL_VLANS src-address-list=VLAN90_Untrusted_Lab
+
+add action=add-src-to-address-list address-list=port_scanners address-list-timeout=1d chain=forward in-interface-list=WAN protocol=tcp psd=21,3s,3,1 comment="Detect Port Scanners (Forward)"
+add action=drop chain=forward comment="DROP ALL OTHER Inter-VLAN Traffic (Apply detailed rules next)"
+
+
+# =================================================================
+# Step 6: IP Addressing
+# =================================================================
+# Assign gateway IPs to the VLAN interfaces as per the network design.
+
+/ip address
+add address=192.168.88.1/24 interface=vlan10-servers network=192.168.88.0
+add address=192.168.89.1/24 interface=vlan11-management network=192.168.89.0
+add address=192.168.90.1/24 interface=vlan12-security network=192.168.90.0
+add address=192.168.91.1/24 interface=vlan20-workstations network=192.168.91.0
+add address=192.168.92.1/24 interface=vlan30-storage network=192.168.92.0
+add address=192.168.93.1/24 interface=vlan70-guest-iot network=192.168.93.0
+add address=192.168.94.1/24 interface=vlan90-untrusted network=192.168.94.0
+add address=192.168.95.1/24 interface=vlan80-reserved network=192.168.95.0
+
+
+# =================================================================
+# Step 7: DHCP Server Setup
+# =================================================================
+# Configure DHCP pools and servers for the VLANs that need them.
+
+/ip pool
+add name=dhcp-pool-vlan10 ranges=192.168.88.11-192.168.88.99
+add name=dhcp-pool-vlan20 ranges=192.168.91.11-192.168.91.99
+add name=dhcp-pool-vlan70 ranges=192.168.93.11-192.168.93.99
+add name=dhcp-pool-vlan90 ranges=192.168.94.11-192.168.94.99
+
+/ip dhcp-server
+add address-pool=dhcp-pool-vlan10 disabled=no interface=vlan10-servers name=dhcp-vlan10
+add address-pool=dhcp-pool-vlan20 disabled=no interface=vlan20-workstations name=dhcp-vlan20
+add address-pool=dhcp-pool-vlan70 disabled=no interface=vlan70-guest-iot name=dhcp-vlan70
+add address-pool=dhcp-pool-vlan90 disabled=no interface=vlan90-untrusted name=dhcp-vlan90
+
+/ip dhcp-server network
+add address=192.168.88.0/24 gateway=192.168.88.1
+add address=192.168.91.0/24 gateway=192.168.91.1
+add address=192.168.93.0/24 gateway=192.168.93.1
+add address=192.168.94.0/24 gateway=192.168.94.1
+
+
+# =================================================================
+# Step 8: NAT (Masquerade)
+# =================================================================
+# This allows your internal network devices to access the internet.
+
+/ip firewall nat
+add action=masquerade chain=srcnat comment="Default NAT for LAN to WAN" out-interface-list=WAN src-address-list=ALL_INTERNAL_VLANS
+
+
+# =================================================================
+# Step 9: System Hardening
+# =================================================================
+# Final tweaks to further secure the router.
+
+# Disable neighbor discovery on the WAN interface.
+/ip neighbor discovery-settings
+set discover-interface-list=!WAN
+
+# Set up NTP client for accurate time logging
+/system ntp client
+set enabled=yes primary-ntp=1.1.1.1 secondary-ntp=8.8.8.8
