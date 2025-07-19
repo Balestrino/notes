@@ -1,0 +1,307 @@
+# MikroTik CCR2004-1G-12S+2XS Homelab Configuration
+# Version: 1.1 - Fixed with PPPoE
+# Date: 2025-07-19
+# Zero Trust Network Design with VLAN Segmentation
+
+# ================================
+# SYSTEM CONFIGURATION
+# ================================
+
+# Set system identity
+/system identity set name="homelab-router"
+
+# Configure system clock and NTP
+/system clock set time-zone-name=auto
+/system ntp client set enabled=yes
+/system ntp client servers add address=pool.ntp.org
+
+# Enable secure services and disable unnecessary ones
+/ip service disable telnet,ftp,www,api,api-ssl
+/ip service set ssh port=22
+/ip service set winbox port=8291 address=192.168.90.0/24
+
+# Configure logging
+/system logging add topics=firewall,info prefix="FIREWALL"
+/system logging add topics=dhcp,info prefix="DHCP"
+/system logging add topics=pppoe,info prefix="PPPoE"
+
+# ================================
+# WAN CONFIGURATION (PPPoE)
+# ================================
+
+# Create VLAN 825 for PPPoE on sfp28-2 (assuming this is your fiber uplink)
+/interface vlan add interface=sfp28-2 name=vlan-825-wan vlan-id=825
+
+# Create PPPoE client
+/interface pppoe-client add name=pppoe-fiber interface=vlan-825-wan user=aruba password=aruba \
+    add-default-route=yes use-peer-dns=yes disabled=no
+
+# ================================
+# INTERFACE LISTS
+# ================================
+
+# Create interface lists for easier rule management
+/interface list add name=WAN
+/interface list add name=LAN
+/interface list add name=MANAGEMENT
+
+# Add WAN interface
+/interface list member add interface=pppoe-fiber list=WAN
+
+# ================================
+# BRIDGE AND VLAN CONFIGURATION
+# ================================
+
+# Create bridge for VLAN switching (vlan-filtering disabled initially)
+/interface bridge add name=bridge-vlans vlan-filtering=no protocol-mode=rstp
+
+# Add trunk port (sfp28-1 to switch) to bridge
+/interface bridge port add bridge=bridge-vlans interface=sfp28-1
+
+# Add server external ports to bridge (SFP+ ports 1-6)
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus1 pvid=10
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus2 pvid=10
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus3 pvid=10
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus4 pvid=10
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus5 pvid=10
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus6 pvid=10
+
+# Add server internal ports to bridge (SFP+ ports 7-12)
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus7 pvid=11
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus8 pvid=11
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus9 pvid=11
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus10 pvid=11
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus11 pvid=11
+/interface bridge port add bridge=bridge-vlans interface=sfp-sfpplus12 pvid=11
+
+# Create VLAN interfaces
+/interface vlan add interface=bridge-vlans name=vlan-10-servers-ext vlan-id=10
+/interface vlan add interface=bridge-vlans name=vlan-11-servers-int vlan-id=11
+/interface vlan add interface=bridge-vlans name=vlan-12-management vlan-id=12
+/interface vlan add interface=bridge-vlans name=vlan-13-security vlan-id=13
+/interface vlan add interface=bridge-vlans name=vlan-20-workstations vlan-id=20
+/interface vlan add interface=bridge-vlans name=vlan-50-guest-iot vlan-id=50
+/interface vlan add interface=bridge-vlans name=vlan-60-untrusted vlan-id=60
+/interface vlan add interface=bridge-vlans name=vlan-70-reserved vlan-id=70
+
+# Configure bridge VLAN table
+# Trunk port (sfp28-1) and bridge - tagged for all VLANs
+/interface bridge vlan add bridge=bridge-vlans tagged=bridge-vlans,sfp28-1 vlan-ids=10,11,12,13,20,50,60,70
+
+# Server External ports - untagged VLAN 10 (already set via pvid)
+# Server Internal ports - untagged VLAN 11 (already set via pvid)
+
+# Add LAN interfaces to interface list
+/interface list member add interface=vlan-10-servers-ext list=LAN
+/interface list member add interface=vlan-11-servers-int list=LAN
+/interface list member add interface=vlan-12-management list=LAN
+/interface list member add interface=vlan-13-security list=LAN
+/interface list member add interface=vlan-20-workstations list=LAN
+/interface list member add interface=vlan-50-guest-iot list=LAN
+/interface list member add interface=vlan-60-untrusted list=LAN
+
+# Add management interfaces
+/interface list member add interface=vlan-12-management list=MANAGEMENT
+/interface list member add interface=ether1 list=MANAGEMENT
+
+# ================================
+# IP ADDRESSING
+# ================================
+
+# Configure IP addresses for VLAN interfaces
+/ip address add address=192.168.88.1/24 interface=vlan-10-servers-ext
+/ip address add address=192.168.89.1/24 interface=vlan-11-servers-int
+/ip address add address=192.168.90.1/24 interface=vlan-12-management
+/ip address add address=192.168.91.1/24 interface=vlan-13-security
+/ip address add address=192.168.92.1/24 interface=vlan-20-workstations
+/ip address add address=192.168.93.1/24 interface=vlan-50-guest-iot
+/ip address add address=192.168.94.1/24 interface=vlan-60-untrusted
+/ip address add address=192.168.95.1/24 interface=vlan-70-reserved
+
+# Configure management interface (ether1)
+/ip address add address=192.168.90.100/24 interface=ether1
+
+# ================================
+# DHCP CONFIGURATION
+# ================================
+
+# Create DHCP pools
+/ip pool add name=pool-servers-ext ranges=192.168.88.2-192.168.88.99
+/ip pool add name=pool-servers-int ranges=192.168.89.2-192.168.89.99
+/ip pool add name=pool-workstations ranges=192.168.92.11-192.168.92.254
+/ip pool add name=pool-guest-iot ranges=192.168.93.11-192.168.93.254
+/ip pool add name=pool-untrusted ranges=192.168.94.11-192.168.94.254
+
+# Create DHCP servers
+/ip dhcp-server add address-pool=pool-servers-ext interface=vlan-10-servers-ext lease-time=1d name=dhcp-servers-ext
+/ip dhcp-server add address-pool=pool-servers-int interface=vlan-11-servers-int lease-time=1d name=dhcp-servers-int
+/ip dhcp-server add address-pool=pool-workstations interface=vlan-20-workstations lease-time=4h name=dhcp-workstations
+/ip dhcp-server add address-pool=pool-guest-iot interface=vlan-50-guest-iot lease-time=1h name=dhcp-guest-iot
+/ip dhcp-server add address-pool=pool-untrusted interface=vlan-60-untrusted lease-time=30m name=dhcp-untrusted
+
+# Configure DHCP networks
+/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1
+/ip dhcp-server network add address=192.168.89.0/24 gateway=192.168.89.1 dns-server=192.168.89.1
+/ip dhcp-server network add address=192.168.92.0/24 gateway=192.168.92.1 dns-server=192.168.92.1
+/ip dhcp-server network add address=192.168.93.0/24 gateway=192.168.93.1 dns-server=192.168.93.1
+/ip dhcp-server network add address=192.168.94.0/24 gateway=192.168.94.1 dns-server=192.168.94.1
+
+# ================================
+# DNS CONFIGURATION
+# ================================
+
+/ip dns set servers=1.1.1.1,8.8.8.8 allow-remote-requests=yes
+
+# ================================
+# FIREWALL CONFIGURATION (Zero Trust)
+# ================================
+
+# Define address lists
+/ip firewall address-list add address=192.168.88.0/24 list=servers-external
+/ip firewall address-list add address=192.168.89.0/24 list=servers-internal
+/ip firewall address-list add address=192.168.90.0/24 list=management
+/ip firewall address-list add address=192.168.91.0/24 list=security-monitoring
+/ip firewall address-list add address=192.168.92.0/24 list=workstations
+/ip firewall address-list add address=192.168.93.0/24 list=guest-iot
+/ip firewall address-list add address=192.168.94.0/24 list=untrusted-lab
+/ip firewall address-list add address=192.168.88.0/21 list=internal-networks
+
+# INPUT chain rules (traffic to router itself)
+/ip firewall filter add chain=input action=accept connection-state=established,related comment="Allow established/related"
+/ip firewall filter add chain=input action=drop connection-state=invalid comment="Drop invalid"
+/ip firewall filter add chain=input action=accept in-interface=lo comment="Allow loopback"
+
+# Management access (highly restricted)
+/ip firewall filter add chain=input action=accept src-address-list=management protocol=tcp dst-port=22 comment="SSH from management"
+/ip firewall filter add chain=input action=accept src-address-list=management protocol=tcp dst-port=8291 comment="Winbox from management"
+/ip firewall filter add chain=input action=accept src-address-list=management protocol=icmp comment="ICMP from management"
+
+# DNS and DHCP services
+/ip firewall filter add chain=input action=accept protocol=udp dst-port=53 src-address-list=internal-networks comment="DNS from internal"
+/ip firewall filter add chain=input action=accept protocol=tcp dst-port=53 src-address-list=internal-networks comment="DNS from internal"
+/ip firewall filter add chain=input action=accept protocol=udp dst-port=67,68 comment="DHCP"
+
+# NTP
+/ip firewall filter add chain=input action=accept protocol=udp dst-port=123 src-address-list=internal-networks comment="NTP from internal"
+
+# Drop all other input
+/ip firewall filter add chain=input action=drop comment="Drop all other input"
+
+# FORWARD chain rules (inter-VLAN traffic)
+/ip firewall filter add chain=forward action=accept connection-state=established,related comment="Allow established/related"
+/ip firewall filter add chain=forward action=drop connection-state=invalid comment="Drop invalid"
+
+# Server Internal VLAN - COMPLETE ISOLATION (no access in or out except to itself)
+/ip firewall filter add chain=forward action=accept src-address-list=servers-internal dst-address-list=servers-internal comment="Allow internal servers to communicate"
+/ip firewall filter add chain=forward action=drop src-address-list=servers-internal comment="Drop all from internal servers"
+/ip firewall filter add chain=forward action=drop dst-address-list=servers-internal comment="Drop all to internal servers"
+
+# Management VLAN access (very restricted)
+/ip firewall filter add chain=forward action=accept src-address-list=management dst-address-list=servers-external protocol=tcp dst-port=8006 comment="Management to Proxmox"
+/ip firewall filter add chain=forward action=accept src-address-list=management dst-address-list=servers-external protocol=tcp dst-port=22 comment="Management to servers SSH"
+/ip firewall filter add chain=forward action=accept src-address-list=management dst-address-list=internal-networks protocol=icmp comment="Management ICMP"
+
+# Security/Monitoring VLAN access
+/ip firewall filter add chain=forward action=accept src-address-list=security-monitoring dst-address-list=servers-external comment="Security monitoring to servers"
+/ip firewall filter add chain=forward action=accept src-address-list=servers-external dst-address-list=security-monitoring protocol=tcp dst-port=9100,9090 comment="Metrics collection"
+
+# Server External communication (removed internal access)
+/ip firewall filter add chain=forward action=accept src-address-list=servers-external dst-address-list=servers-external comment="Servers external to external"
+
+# Workstations access
+/ip firewall filter add chain=forward action=accept src-address-list=workstations dst-address-list=servers-external protocol=tcp dst-port=80,443,22 comment="Workstations to servers web/SSH"
+/ip firewall filter add chain=forward action=accept src-address-list=workstations dst-address-list=management protocol=tcp dst-port=8006 comment="Workstations to Proxmox"
+
+# Internet access rules
+/ip firewall filter add chain=forward action=accept src-address-list=servers-external out-interface-list=WAN comment="Servers to internet"
+/ip firewall filter add chain=forward action=accept src-address-list=workstations out-interface-list=WAN comment="Workstations to internet"
+/ip firewall filter add chain=forward action=accept src-address-list=guest-iot out-interface-list=WAN comment="Guest/IoT to internet only"
+/ip firewall filter add chain=forward action=accept src-address-list=untrusted-lab out-interface-list=WAN comment="Untrusted to internet only"
+
+# Isolation rules (deny inter-VLAN by default)
+/ip firewall filter add chain=forward action=drop src-address-list=guest-iot dst-address-list=internal-networks comment="Block guest/IoT from internal"
+/ip firewall filter add chain=forward action=drop src-address-list=untrusted-lab dst-address-list=internal-networks comment="Block untrusted from internal"
+
+# Final drop rule
+/ip firewall filter add chain=forward action=drop comment="Drop all other forward"
+
+# ================================
+# NAT CONFIGURATION
+# ================================
+
+# Masquerade for internet access
+/ip firewall nat add chain=srcnat action=masquerade out-interface-list=WAN comment="Internet NAT"
+
+# ================================
+# SECURITY HARDENING
+# ================================
+
+# Disable unnecessary services
+/ip service disable telnet,ftp,www,api
+
+# Configure MAC server access
+/tool mac-server set allowed-interface-list=MANAGEMENT
+/tool mac-server mac-winbox set allowed-interface-list=MANAGEMENT
+
+# Neighbor discovery
+/ip neighbor discovery-settings set discover-interface-list=LAN
+
+# Bandwidth monitoring
+/tool bandwidth-server set enabled=no
+
+# ================================
+# MONITORING AND LOGGING
+# ================================
+
+# Enable connection tracking for monitoring
+/ip firewall connection tracking set enabled=yes
+
+# PPPoE monitoring
+/interface pppoe-client monitor pppoe-fiber once
+
+# ================================
+# QUALITY OF SERVICE (Optional)
+# ================================
+
+# Simple queue for bandwidth management (adjust as needed)
+# /queue simple add name="Management Priority" target=192.168.90.0/24 max-limit=100M/100M priority=1/1
+# /queue simple add name="Servers" target=192.168.88.0/24 max-limit=1G/1G priority=2/2
+# /queue simple add name="Workstations" target=192.168.92.0/24 max-limit=500M/500M priority=3/3
+
+# ================================
+# FINAL VLAN FILTERING ENABLE
+# ================================
+
+# Enable VLAN filtering on bridge (do this last!)
+/interface bridge set bridge-vlans vlan-filtering=yes
+
+# ================================
+# BACKUP AND FINAL STEPS
+# ================================
+
+# Create initial backup
+/system backup save name=initial-config-with-pppoe
+
+# Export configuration
+/export file=initial-config-with-pppoe
+
+# Print important information
+:log info "=== HOMELAB ROUTER CONFIGURATION COMPLETE ==="
+:log info "Management IP: 192.168.90.100/24"
+:log info "PPPoE Interface: pppoe-fiber (VLAN 825)"
+:log info "PLEASE CHANGE DEFAULT PASSWORDS!"
+:log info "Server Internal VLAN is completely isolated"
+:log info "Review and test firewall rules"
+:log info "Configuration backed up as 'initial-config-with-pppoe'"
+
+# ================================
+# TODO: Manual configuration required
+# ================================
+# 1. Change all default passwords
+# 2. Verify PPPoE connection status with: /interface pppoe-client monitor pppoe-fiber
+# 3. Configure SSL certificates for secure management
+# 4. Review and adjust firewall rules based on specific requirements
+# 5. Set up monitoring and alerting
+# 6. Configure backup schedules
+# 7. Test all VLAN connectivity and isolation
+# 8. Verify Server Internal VLAN complete isolation
